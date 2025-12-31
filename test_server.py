@@ -8,6 +8,7 @@ from mcp_blockchain_rail.server import (
     query_rpc_urls,
     set_rpc,
     check_native_balance,
+    get_source_code,
 )
 
 
@@ -59,8 +60,23 @@ def main():
         if test_set_rpc(test_rpc):
             # Test 3: Check Balance
             test_check_native_balance()
-        else:
-            print("Set RPC failed with queried URL.")
+
+            # Test 4: Get Source Code (DAI on Mainnet)
+            print(
+                "\nTesting get_source_code(1, '0x6B175474E89094C44Da98b954EedeAC495271d0F')..."
+            )
+
+            source = get_source_code(1, "0x6B175474E89094C44Da98b954EedeAC495271d0F")
+
+            if "contract Dai" in source or "pragma solidity" in source:
+                print("Success: Source code fetched.")
+            elif "API key" in source:
+                print(
+                    "Note: Source code fetch requires API key for Etherscan fallback."
+                )
+                print(f"Result: {source}")
+            else:
+                print(f"Failed or contract not found/verified: {source[:100]}")
     else:
         print(
             "Query failed to return valid RPCs, falling back to known good one for basic sanity check."

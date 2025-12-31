@@ -160,6 +160,88 @@ def check_native_balance(chain_id: int, address: str) -> str:
         return f"Error fetching balance from {rpc_url}: {str(e)}"
 
 
+API_KEYS: Dict[str, str] = {}
+
+
+@mcp.tool()
+def set_api_key(provider: str, key: str) -> str:
+    """
+    Set an API key for a specific provider (e.g., 'etherscan').
+
+    Args:
+        provider: The name of the service (e.g., 'etherscan').
+        key: The API key.
+    """
+    API_KEYS[provider.lower()] = key
+    return f"Success: API key set for {provider}"
+
+
+@mcp.tool()
+def get_source_code(chain_id: int, contract_address: str) -> str:
+    """
+    Get the source code of a verified contract.
+    First tries Sourcify, then falls back to Etherscan.
+
+    Args:
+        chain_id: The chain ID of the network.
+        contract_address: The address of the contract.
+    """
+    SOURCIFY_BASE_URL = "https://sourcify.dev/server"
+
+    # Checksum the address
+    checksum_address = Web3.to_checksum_address(contract_address)
+
+    # 1. Try Sourcify
+    try:
+        url = f"{SOURCIFY_BASE_URL}/files/{chain_id}/{checksum_address}"
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 200:
+            files = response.json()
+            result = []
+            for file in files:
+                path = file.get("path", "unknown_path")
+                content = file.get("content", "")
+                result.append(f"// File: {path}\n{content}")
+            return "\n\n".join(result)
+    except Exception:
+        # Continue to fallback if Sourcify errors out
+        pass
+
+    # 2. Fallback to Etherscan (V2 API supports multiple chains)
+    api_key = API_KEYS.get("etherscan") or os.environ.get("ETHERSCAN_API_KEY")
+
+    if api_key:
+        try:
+            # Using Etherscan V2 API
+            etherscan_url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={checksum_address}&apikey={api_key}"
+            response = requests.get(etherscan_url, timeout=10)
+            data = response.json()
+
+            if data.get("status") == "1" and data.get("result"):
+                result_data = data["result"][0]
+                source_code = result_data["SourceCode"]
+
+                # Etherscan often wraps multiple files in double curly braces {{...}} JSON
+                if source_code.startswith("{{"):
+                    try:
+                        # Normalize format to be valid JSON if needed
+                        sources = json.loads(
+                            source_code[1:-1]
+                        )  # Unwrap one layer if it is {{...}}
+                        return f"{json.dumps(sources, indent=2)}"
+                    except Exception:
+                        pass
+
+                return f"{source_code}"
+
+            return f"Error: Contract not verified on Etherscan (Status: {data.get('message')})"
+        except Exception as e:
+            return f"Error fetching from Etherscan: {str(e)}"
+
+    return f"Error: Contract not found on Sourcify for chain ID {chain_id} and address {checksum_address}. Etherscan fallback failed (missing API key or contract not found)."
+
+
 def main():
     mcp.run()
 
