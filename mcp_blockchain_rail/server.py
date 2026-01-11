@@ -16,6 +16,35 @@ CHAIN_LIST_URL = "https://chainid.network/chains.json"
 CACHE_FILE = "chain_cache.json"
 CACHE_DURATION = 3600
 
+CONFIG_FILE = "rail_config.json"
+
+NOTE_API_KEYS_SECURITY = (
+    "SECURITY WARNING: API keys are stored in plain text. "
+    "Do not commit this file to version control."
+)
+
+
+def load_config() -> None:
+    """Load RPC configs and API keys from config file."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE) as f:
+                config_data = json.load(f)
+                RPC_CONFIG.update(config_data.get("rpcs", {}))
+                API_KEYS.update(config_data.get("api_keys", {}))
+    except Exception:
+        pass
+
+
+def save_config() -> None:
+    """Save RPC configs and API keys to config file."""
+    try:
+        config_data = {"rpcs": RPC_CONFIG, "api_keys": API_KEYS}
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config_data, f, indent=2)
+    except Exception:
+        pass
+
 
 def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
     """Helper to verify if an RPC is reachable, on the correct chain, and
@@ -51,6 +80,7 @@ def set_rpc(chain_id: int, rpc_url: str) -> str:
     try:
         if verify_rpc(rpc_url, chain_id, timeout=10):
             RPC_CONFIG[chain_id] = rpc_url
+            save_config()
             return f"Success: RPC URL for chain ID {chain_id} set to {rpc_url}"
         else:
             return (
@@ -173,6 +203,8 @@ def check_native_balance(chain_id: int, address: str) -> str:
 
 API_KEYS: dict[str, str] = {}
 
+load_config()
+
 
 @mcp.tool()
 def set_api_key(provider: str, key: str) -> str:
@@ -184,7 +216,64 @@ def set_api_key(provider: str, key: str) -> str:
         key: The API key.
     """
     API_KEYS[provider.lower()] = key
+    save_config()
     return f"Success: API key set for {provider}"
+
+
+@mcp.tool()
+def delete_rpc(chain_id: int) -> str:
+    """
+    Delete the RPC URL configuration for a specific chain ID.
+
+    Args:
+        chain_id: The chain ID to remove the RPC configuration for.
+    """
+    if chain_id in RPC_CONFIG:
+        del RPC_CONFIG[chain_id]
+        save_config()
+        return f"Success: RPC configuration for chain ID {chain_id} deleted."
+    return f"Error: No RPC configuration found for chain ID {chain_id}."
+
+
+@mcp.tool()
+def delete_api_key(provider: str) -> str:
+    """
+    Delete the API key configuration for a specific provider.
+
+    Args:
+        provider: The name of the service (e.g., 'etherscan').
+    """
+    provider_key = provider.lower()
+    if provider_key in API_KEYS:
+        del API_KEYS[provider_key]
+        save_config()
+        return f"Success: API key for {provider} deleted."
+    return f"Error: No API key found for {provider}."
+
+
+@mcp.tool()
+def list_configs() -> str:
+    """
+    List all saved RPC configurations and API keys.
+    API keys are masked for security.
+    """
+    lines = []
+    lines.append("=== RPC Configuration ===")
+    if RPC_CONFIG:
+        for chain_id, rpc_url in RPC_CONFIG.items():
+            lines.append(f"  Chain {chain_id}: {rpc_url}")
+    else:
+        lines.append("  No RPCs configured.")
+
+    lines.append("\n=== API Keys ===")
+    if API_KEYS:
+        for provider, key in API_KEYS.items():
+            masked_key = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "***"
+            lines.append(f"  {provider}: {masked_key}")
+    else:
+        lines.append("  No API keys configured.")
+
+    return "\n".join(lines)
 
 
 @mcp.tool()
