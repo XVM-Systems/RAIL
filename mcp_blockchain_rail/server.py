@@ -30,8 +30,10 @@ def load_config() -> None:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE) as f:
                 config_data = json.load(f)
-                RPC_CONFIG.update(config_data.get("rpcs", {}))
+                rpcs = config_data.get("rpcs", {})
                 API_KEYS.update(config_data.get("api_keys", {}))
+                for chain_id_str, rpc_url in rpcs.items():
+                    RPC_CONFIG[int(chain_id_str)] = rpc_url
     except Exception:
         pass
 
@@ -39,7 +41,8 @@ def load_config() -> None:
 def save_config() -> None:
     """Save RPC configs and API keys to config file."""
     try:
-        config_data = {"rpcs": RPC_CONFIG, "api_keys": API_KEYS}
+        rpcs_as_strings = {str(k): v for k, v in RPC_CONFIG.items()}
+        config_data = {"rpcs": rpcs_as_strings, "api_keys": API_KEYS}
         with open(CONFIG_FILE, "w") as f:
             json.dump(config_data, f, indent=2)
     except Exception:

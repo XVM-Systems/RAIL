@@ -8,6 +8,11 @@ from mcp_blockchain_rail.server import (
     check_native_balance,
     set_api_key,
     get_source_code,
+    load_config,
+    save_config,
+    delete_rpc,
+    delete_api_key,
+    list_configs,
 )
 
 
@@ -237,3 +242,118 @@ class TestGetSourceCode:
 
             assert "Error" in result
             assert "Contract not found" in result
+
+
+class TestPersistence:
+    def test_save_config_writes_file(self, tmp_path):
+        """Test save_config writes data to config file."""
+        RPC_CONFIG[1] = "http://rpc1.com"
+        API_KEYS["etherscan"] = "test_key_123"
+
+        with patch(
+            "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
+        ):
+            save_config()
+
+            import json
+
+            with open(tmp_path / "config.json") as f:
+                data = json.load(f)
+                assert data["rpcs"] == {"1": "http://rpc1.com"}
+                assert data["api_keys"] == {"etherscan": "test_key_123"}
+
+    def test_load_config_reads_file(self, tmp_path):
+        """Test load_config reads data from config file."""
+        config_data = {
+            "rpcs": {"1": "http://rpc1.com", "137": "http://rpc2.com"},
+            "api_keys": {"etherscan": "key123"},
+        }
+
+        config_file = tmp_path / "config.json"
+        import json
+
+        with open(config_file, "w") as f:
+            json.dump(config_data, f)
+
+        with patch("mcp_blockchain_rail.server.CONFIG_FILE", str(config_file)):
+            RPC_CONFIG.clear()
+            API_KEYS.clear()
+            load_config()
+
+            assert RPC_CONFIG == {1: "http://rpc1.com", 137: "http://rpc2.com"}
+            assert API_KEYS == {"etherscan": "key123"}
+
+    def test_load_config_creates_empty_if_missing(self):
+        """Test load_config handles missing config file gracefully."""
+        with patch("mcp_blockchain_rail.server.os.path.exists", return_value=False):
+            RPC_CONFIG[1] = "existing"
+            API_KEYS["test"] = "test"
+
+            load_config()
+
+            assert RPC_CONFIG[1] == "existing"
+            assert API_KEYS["test"] == "test"
+
+
+class TestDeleteRpc:
+    def test_delete_rpc_existing(self, tmp_path):
+        """Test delete_rpc removes existing RPC."""
+        RPC_CONFIG[1] = "http://rpc1.com"
+
+        with patch(
+            "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
+        ):
+            result = delete_rpc(1)
+
+            assert "Success" in result
+            assert 1 not in RPC_CONFIG
+
+    def test_delete_rpc_nonexistent(self):
+        """Test delete_rpc when RPC doesn't exist."""
+        result = delete_rpc(999)
+        assert "Error" in result
+        assert "found" in result
+
+
+class TestDeleteApiKey:
+    def test_delete_api_key_existing(self, tmp_path):
+        """Test delete_api_key removes existing key."""
+        API_KEYS["etherscan"] = "test_key"
+
+        with patch(
+            "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
+        ):
+            result = delete_api_key("etherscan")
+
+            assert "Success" in result
+            assert "etherscan" not in API_KEYS
+
+    def test_delete_api_key_nonexistent(self):
+        """Test delete_api_key when key doesn't exist."""
+        result = delete_api_key("nonexistent")
+        assert "Error" in result
+        assert "found" in result
+
+
+class TestListConfigs:
+    def test_list_configs_with_data(self):
+        """Test list_configs displays existing configs."""
+        RPC_CONFIG[1] = "http://rpc1.com"
+        RPC_CONFIG[137] = "http://rpc2.com"
+        API_KEYS["etherscan"] = "test_key_123456789"
+
+        result = list_configs()
+
+        assert "Chain 1: http://rpc1.com" in result
+        assert "Chain 137: http://rpc2.com" in result
+        assert "etherscan: test...6789" in result
+
+    def test_list_configs_empty(self):
+        """Test list_configs with no configs."""
+        RPC_CONFIG.clear()
+        API_KEYS.clear()
+
+        result = list_configs()
+
+        assert "No RPCs configured" in result
+        assert "No API keys configured" in result
