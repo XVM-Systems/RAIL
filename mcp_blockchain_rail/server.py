@@ -1,17 +1,16 @@
-from typing import Dict, List
-import random
-import requests
 import concurrent.futures
+import json
+import os
+import random
+import time
+
+import requests
 from mcp.server.fastmcp import FastMCP
 from web3 import Web3
 
-import json
-import os
-import time
-
 mcp = FastMCP("mcp-blockchain-rail")
 
-RPC_CONFIG: Dict[int, str] = {}
+RPC_CONFIG: dict[int, str] = {}
 
 CHAIN_LIST_URL = "https://chainid.network/chains.json"
 CACHE_FILE = "chain_cache.json"
@@ -19,7 +18,9 @@ CACHE_DURATION = 3600
 
 
 def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
-    """Helper to verify if an RPC is reachable, on the correct chain, and can read state."""
+    """Helper to verify if an RPC is reachable, on the correct chain, and
+    can read state.
+    """
     try:
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
         if not w3.is_connected():
@@ -28,8 +29,9 @@ def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
         if w3.eth.chain_id != chain_id:
             return False
 
-        # Verify basic state read
-        w3.eth.get_balance("0x0000000000000000000000000000000000000000")
+        w3.eth.get_balance(
+            Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+        )
 
         return True
     except Exception:
@@ -51,13 +53,16 @@ def set_rpc(chain_id: int, rpc_url: str) -> str:
             RPC_CONFIG[chain_id] = rpc_url
             return f"Success: RPC URL for chain ID {chain_id} set to {rpc_url}"
         else:
-            return f"Error: RPC URL {rpc_url} is unreachable or belongs to a different chain ID."
+            return (
+                f"Error: RPC URL {rpc_url} is unreachable or belongs to a "
+                f"different chain ID."
+            )
     except Exception as e:
         return f"Error validating RPC: {str(e)}"
 
 
 @mcp.tool()
-def query_rpc_urls(chain_id: int) -> List[str]:
+def query_rpc_urls(chain_id: int) -> list[str]:
     """
     Query and return RELIABLE public RPC URLs for a given chain ID from ChainList.
     Performs active verification to ensure the RPCs are reachable.
@@ -73,7 +78,7 @@ def query_rpc_urls(chain_id: int) -> List[str]:
         # Try to load from cache
         if os.path.exists(CACHE_FILE):
             try:
-                with open(CACHE_FILE, "r") as f:
+                with open(CACHE_FILE) as f:
                     cache_data = json.load(f)
                     if current_time - cache_data.get("timestamp", 0) < CACHE_DURATION:
                         chains = cache_data.get("data")
@@ -139,12 +144,18 @@ def check_native_balance(chain_id: int, address: str) -> str:
     """
     rpc_url = RPC_CONFIG.get(chain_id)
     if not rpc_url:
-        return f"Error: No RPC URL configured for chain ID {chain_id}. Please use set_rpc({chain_id}, 'YOUR_RPC_URL') first."
+        return (
+            f"Error: No RPC URL configured for chain ID {chain_id}. "
+            f"Please use set_rpc({chain_id}, 'YOUR_RPC_URL') first."
+        )
 
     try:
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
         if not w3.is_connected():
-            return "Error: Could not connect to configured RPC URL. It may have gone offline."
+            return (
+                "Error: Could not connect to configured RPC URL. "
+                "It may have gone offline."
+            )
 
         # Ensure checksum address
         try:
@@ -160,7 +171,7 @@ def check_native_balance(chain_id: int, address: str) -> str:
         return f"Error fetching balance from {rpc_url}: {str(e)}"
 
 
-API_KEYS: Dict[str, str] = {}
+API_KEYS: dict[str, str] = {}
 
 
 @mcp.tool()
@@ -186,14 +197,12 @@ def get_source_code(chain_id: int, contract_address: str) -> str:
         chain_id: The chain ID of the network.
         contract_address: The address of the contract.
     """
-    SOURCIFY_BASE_URL = "https://sourcify.dev/server"
+    sourcify_base_url = "https://sourcify.dev/server"
 
-    # Checksum the address
     checksum_address = Web3.to_checksum_address(contract_address)
 
-    # 1. Try Sourcify
     try:
-        url = f"{SOURCIFY_BASE_URL}/files/{chain_id}/{checksum_address}"
+        url = f"{sourcify_base_url}/files/{chain_id}/{checksum_address}"
         response = requests.get(url, timeout=10)
 
         if response.status_code == 200:
@@ -222,27 +231,30 @@ def get_source_code(chain_id: int, contract_address: str) -> str:
                 result_data = data["result"][0]
                 source_code = result_data["SourceCode"]
 
-                # Etherscan often wraps multiple files in double curly braces {{...}} JSON
                 if source_code.startswith("{{"):
                     try:
-                        # Normalize format to be valid JSON if needed
-                        sources = json.loads(
-                            source_code[1:-1]
-                        )  # Unwrap one layer if it is {{...}}
+                        sources = json.loads(source_code[1:-1])
                         return f"{json.dumps(sources, indent=2)}"
                     except Exception:
                         pass
 
                 return f"{source_code}"
 
-            return f"Error: Contract not verified on Etherscan (Status: {data.get('message')})"
+            return (
+                f"Error: Contract not verified on Etherscan "
+                f"(Status: {data.get('message')})"
+            )
         except Exception as e:
             return f"Error fetching from Etherscan: {str(e)}"
 
-    return f"Error: Contract not found on Sourcify for chain ID {chain_id} and address {checksum_address}. Etherscan fallback failed (missing API key or contract not found)."
+    return (
+        f"Error: Contract not found on Sourcify for chain ID {chain_id} and "
+        f"address {checksum_address}. Etherscan fallback failed "
+        f"(missing API key or contract not found)."
+    )
 
 
-def main():
+def main() -> None:
     mcp.run()
 
 
