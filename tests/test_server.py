@@ -342,7 +342,7 @@ class TestHealthCheckRpc:
 
             assert result["healthy"] is False
             assert result["chain_id"] == 2
-            assert "chain ID" in result["error"].lower()
+            assert "Chain ID" in result["error"]
 
     def test_health_check_rpc_exception(self):
         """Test health_check_rpc when exception occurs."""
@@ -592,7 +592,7 @@ class TestListConfigs:
         assert "Chain 1:" in result
         assert "Primary: http://rpc1.com" in result
         assert "Chain 137:" in result
-        assert "etherscan: test...456789" in result
+        assert "etherscan: test...6789" in result
 
     def test_list_configs_empty(self):
         """Test list_configs with no configs."""

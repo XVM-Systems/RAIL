@@ -48,6 +48,8 @@ RAIL/
 9. `check_rpc_health(chain_id)` - Check health of all configured RPCs
 10. `set_backup_rpc(chain_id, rpc_url)` - Add a backup RPC to a chain
 11. `rotate_rpc(chain_id)` - Rotate to next backup RPC for a chain
+12. `get_token_balance(chain_id, token_address, wallet_address)` - Query ERC-20 token balance
+13. `get_token_info(chain_id, token_address)` - Get ERC-20 token metadata (name, symbol, decimals, total supply)
 
 ### Important Patterns
 - **RPC Validation**: All RPCs are verified for connectivity and chain ID matching before use
