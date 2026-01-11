@@ -37,21 +37,28 @@ RAIL/
 ## Key Components
 
 ### MCP Tools (in `server.py`)
-1. `set_rpc(chain_id, rpc_url)` - Configure and validate RPC endpoints
+1. `set_rpc(chain_id, rpc_url)` - Configure and validate RPC endpoints (supports primary + backups)
 2. `query_rpc_urls(chain_id)` - Find reliable public RPCs from ChainList
-3. `check_native_balance(chain_id, address)` - Query ETH balance
+3. `check_native_balance(chain_id, address)` - Query ETH balance (with automatic failover)
 4. `set_api_key(provider, key)` - Configure explorer API keys
-5. `get_source_code(chain_id, contract_address)` - Fetch verified contract code
+5. `get_source_code(chain_id, contract_address)` - Fetch verified contract code (with automatic failover)
 6. `delete_rpc(chain_id)` - Delete RPC configuration for a chain
 7. `delete_api_key(provider)` - Delete API key for a provider
-8. `list_configs()` - List all saved configurations
+8. `list_configs()` - List all saved configurations (shows primary and backups)
+9. `check_rpc_health(chain_id)` - Check health of all configured RPCs
+10. `set_backup_rpc(chain_id, rpc_url)` - Add a backup RPC to a chain
+11. `rotate_rpc(chain_id)` - Rotate to next backup RPC for a chain
 
 ### Important Patterns
 - **RPC Validation**: All RPCs are verified for connectivity and chain ID matching before use
+- **RPC Failover**: Primary RPC is tried first, then backups automatically if primary fails
+- **Auto-Promotion**: Working backup RPCs are promoted to primary position on success
+- **Health Monitoring**: RPC health can be checked with detailed status and latency
 - **Caching**: ChainList data is cached locally for 1 hour (`chain_cache.json`)
 - **Parallel Verification**: RPCs are verified concurrently using ThreadPoolExecutor
 - **Fallback Strategy**: Source code fetch tries Sourcify first, then Etherscan
 - **Configuration Persistence**: RPCs and API keys are saved to `rail_config.json` and automatically loaded on startup
+- **Multiple Backups**: Each chain stores primary + up to 2 backup RPCs (3 total)
 
 ## Development Workflow
 
