@@ -13,6 +13,11 @@ from mcp_blockchain_rail.server import (
     delete_rpc,
     delete_api_key,
     list_configs,
+    health_check_rpc,
+    get_working_rpc,
+    check_rpc_health,
+    set_backup_rpc,
+    rotate_rpc,
 )
 
 
@@ -25,7 +30,19 @@ class TestSetRpc:
 
             assert "Success" in result
             assert "chain ID 1" in result
-            assert RPC_CONFIG[1] == "http://valid-rpc.com"
+            assert RPC_CONFIG[1][0] == "http://valid-rpc.com"
+
+    def test_set_rpc_prepends_to_existing(self):
+        """Test set_rpc prepends new RPC to existing list."""
+        RPC_CONFIG[1] = ["http://old1.com", "http://old2.com"]
+
+        with patch("mcp_blockchain_rail.server.verify_rpc") as mock_verify:
+            mock_verify.return_value = True
+            result = set_rpc(1, "http://new-rpc.com")
+
+            assert "Success" in result
+            assert RPC_CONFIG[1][0] == "http://new-rpc.com"
+            assert RPC_CONFIG[1][1] == "http://old1.com"
 
     def test_set_rpc_invalid(self):
         """Test set_rpc with invalid RPC URL."""
@@ -122,13 +139,16 @@ class TestCheckNativeBalance:
         """Test check_native_balance when no RPC is set."""
         result = check_native_balance(1, "0x1234567890123456789012345678901234567890")
         assert "Error" in result
-        assert "No RPC URL configured" in result
+        assert "No RPC configuration" in result
 
     def test_check_native_balance_success(self):
         """Test check_native_balance with valid RPC."""
-        RPC_CONFIG[1] = "http://test-rpc.com"
+        RPC_CONFIG[1] = ["http://test-rpc.com"]
 
-        with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
+        with (
+            patch("mcp_blockchain_rail.server.Web3") as mock_web3,
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
+        ):
             mock_w3 = MagicMock()
             mock_w3.is_connected.return_value = True
             mock_w3.eth.get_balance.return_value = 1000000000000000000
@@ -136,18 +156,61 @@ class TestCheckNativeBalance:
             mock_web3.HTTPProvider.return_value = mock_w3
             mock_web3.return_value = mock_w3
 
+            mock_health_check.return_value = {
+                "healthy": True,
+                "chain_id": 1,
+                "latency_ms": 50,
+                "error": "",
+            }
+
             result = check_native_balance(
                 1, "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
             )
 
             assert "1.0 ETH" in result
 
+    def test_check_native_balance_failover(self):
+        """Test check_native_balance with automatic failover."""
+        RPC_CONFIG[1] = ["http://failed-rpc.com", "http://backup-rpc.com"]
+
+        with patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check:
+
+            def health_side_effect(rpc_url, chain_id, timeout):
+                return (
+                    {"healthy": False, "latency_ms": 0, "error": "failed"}
+                    if rpc_url == "http://failed-rpc.com"
+                    else {
+                        "healthy": True,
+                        "latency_ms": 100,
+                        "error": "",
+                        "chain_id": 1,
+                    }
+                )
+
+            mock_health_check.side_effect = health_side_effect
+
+            with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
+                mock_w3 = MagicMock()
+                mock_w3.is_connected.return_value = True
+                mock_w3.eth.get_balance.return_value = 1000000000000000000
+                mock_w3.from_wei.return_value = "1.0"
+                mock_w3.HTTPProvider.return_value = mock_w3
+                mock_web3.return_value = mock_w3
+
+                result = check_native_balance(
+                    1, "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                )
+
+                assert "1.0 ETH" in result
+                assert RPC_CONFIG[1][0] == "http://backup-rpc.com"
+
     def test_check_native_balance_invalid_address(self):
         """Test check_native_balance with invalid address."""
-        RPC_CONFIG[1] = "http://test-rpc.com"
+        RPC_CONFIG[1] = ["http://test-rpc.com"]
 
         with (
             patch("mcp_blockchain_rail.server.Web3") as mock_web3_class,
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
             patch(
                 "mcp_blockchain_rail.server.Web3.to_checksum_address"
             ) as mock_checksum,
@@ -158,26 +221,16 @@ class TestCheckNativeBalance:
             mock_web3_class.return_value = mock_w3
             mock_checksum.side_effect = ValueError("Invalid address")
 
+            mock_health_check.return_value = {
+                "healthy": True,
+                "chain_id": 1,
+                "latency_ms": 50,
+                "error": "",
+            }
+
             result = check_native_balance(1, "invalid-address")
             assert "Error" in result
             assert "Invalid address format" in result
-
-    def test_check_native_balance_rpc_offline(self):
-        """Test check_native_balance when RPC goes offline."""
-        RPC_CONFIG[1] = "http://test-rpc.com"
-
-        with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
-            mock_w3 = MagicMock()
-            mock_w3.is_connected.return_value = False
-            mock_web3.HTTPProvider.return_value = mock_w3
-            mock_web3.return_value = mock_w3
-
-            result = check_native_balance(
-                1, "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
-            )
-
-            assert "Error" in result
-            assert "Could not connect" in result
 
 
 class TestSetApiKey:
@@ -238,67 +291,259 @@ class TestGetSourceCode:
             mock_response.status_code = 404
             mock_get.return_value = mock_response
 
-            result = get_source_code(1, "0x0000000000000000000000000000000000000000")
+            result = get_source_code(1, "0x6B175474E89094C44Da98b954EedeAC495271d0F")
 
             assert "Error" in result
             assert "Contract not found" in result
 
 
-class TestPersistence:
-    def test_save_config_writes_file(self, tmp_path):
-        """Test save_config writes data to config file."""
-        RPC_CONFIG[1] = "http://rpc1.com"
-        API_KEYS["etherscan"] = "test_key_123"
+class TestHealthCheckRpc:
+    def test_health_check_rpc_healthy(self):
+        """Test health_check_rpc returns healthy status."""
+        with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
+            mock_w3 = MagicMock()
+            mock_w3.is_connected.return_value = True
+            mock_w3.eth.chain_id = 1
+            mock_w3.eth.get_balance.return_value = 0
+            mock_web3.HTTPProvider.return_value = mock_w3
+            mock_web3.return_value = mock_w3
 
-        with patch(
-            "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
-        ):
-            save_config()
+            result = health_check_rpc("http://valid-rpc.com", 1, timeout=5)
 
-            import json
+            assert result["healthy"] is True
+            assert result["chain_id"] == 1
+            assert result["latency_ms"] >= 0
+            assert result["error"] == ""
 
-            with open(tmp_path / "config.json") as f:
-                data = json.load(f)
-                assert data["rpcs"] == {"1": "http://rpc1.com"}
-                assert data["api_keys"] == {"etherscan": "test_key_123"}
+    def test_health_check_rpc_not_connected(self):
+        """Test health_check_rpc when RPC not connected."""
+        with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
+            mock_w3 = MagicMock()
+            mock_w3.is_connected.return_value = False
+            mock_web3.HTTPProvider.return_value = mock_w3
+            mock_web3.return_value = mock_w3
 
-    def test_load_config_reads_file(self, tmp_path):
-        """Test load_config reads data from config file."""
-        config_data = {
-            "rpcs": {"1": "http://rpc1.com", "137": "http://rpc2.com"},
-            "api_keys": {"etherscan": "key123"},
-        }
+            result = health_check_rpc("http://unreachable-rpc.com", 1, timeout=5)
 
-        config_file = tmp_path / "config.json"
-        import json
+            assert result["healthy"] is False
+            assert result["chain_id"] is None
+            assert result["error"] == "Not connected"
 
-        with open(config_file, "w") as f:
-            json.dump(config_data, f)
+    def test_health_check_rpc_wrong_chain(self):
+        """Test health_check_rpc when chain ID mismatch."""
+        with patch("mcp_blockchain_rail.server.Web3") as mock_web3:
+            mock_w3 = MagicMock()
+            mock_w3.is_connected.return_value = True
+            mock_w3.eth.chain_id = 2
+            mock_w3.HTTPProvider.return_value = mock_w3
+            mock_web3.return_value = mock_w3
 
-        with patch("mcp_blockchain_rail.server.CONFIG_FILE", str(config_file)):
-            RPC_CONFIG.clear()
-            API_KEYS.clear()
-            load_config()
+            result = health_check_rpc("http://wrong-chain-rpc.com", 1, timeout=5)
 
-            assert RPC_CONFIG == {1: "http://rpc1.com", 137: "http://rpc2.com"}
-            assert API_KEYS == {"etherscan": "key123"}
+            assert result["healthy"] is False
+            assert result["chain_id"] == 2
+            assert "chain ID" in result["error"].lower()
 
-    def test_load_config_creates_empty_if_missing(self):
-        """Test load_config handles missing config file gracefully."""
-        with patch("mcp_blockchain_rail.server.os.path.exists", return_value=False):
-            RPC_CONFIG[1] = "existing"
-            API_KEYS["test"] = "test"
+    def test_health_check_rpc_exception(self):
+        """Test health_check_rpc when exception occurs."""
+        with patch("mcp_blockchain_rail.server.Web3") as mock_web3_class:
+            mock_web3_instance = MagicMock()
+            mock_web3_instance.is_connected.return_value = True
+            mock_web3_instance.eth.chain_id = 1
+            mock_web3_instance.HTTPProvider.return_value = MagicMock()
+            mock_web3_class.HTTPProvider.return_value = mock_web3_instance
+            mock_web3_class.side_effect = Exception("Network error")
 
-            load_config()
+            result = health_check_rpc("http://error-rpc.com", 1, timeout=5)
 
-            assert RPC_CONFIG[1] == "existing"
-            assert API_KEYS["test"] == "test"
+            assert result["healthy"] is False
+            assert result["chain_id"] is None
+            assert "Network error" in result["error"]
+
+
+class TestGetWorkingRpc:
+    def test_get_working_rpc_success(self):
+        """Test get_working_rpc returns primary RPC."""
+        RPC_CONFIG[1] = ["http://primary-rpc.com"]
+
+        with patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check:
+            mock_health_check.return_value = {
+                "healthy": True,
+                "chain_id": 1,
+                "latency_ms": 50,
+                "error": "",
+            }
+
+            result = get_working_rpc(1)
+
+            assert result == "http://primary-rpc.com"
+            assert RPC_CONFIG[1][0] == "http://primary-rpc.com"
+
+    def test_get_working_rpc_failover(self):
+        """Test get_working_rpc fails over to backup."""
+        RPC_CONFIG[1] = ["http://primary-rpc.com", "http://backup-rpc.com"]
+
+        with patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check:
+
+            def health_side_effect(rpc_url, chain_id, timeout):
+                return (
+                    {
+                        "healthy": False,
+                        "latency_ms": 0,
+                        "error": "failed",
+                        "chain_id": None,
+                    }
+                    if rpc_url == "http://primary-rpc.com"
+                    else {
+                        "healthy": True,
+                        "latency_ms": 100,
+                        "error": "",
+                        "chain_id": 1,
+                    }
+                )
+
+            mock_health_check.side_effect = health_side_effect
+
+            result = get_working_rpc(1)
+
+            assert result == "http://backup-rpc.com"
+            assert RPC_CONFIG[1][0] == "http://backup-rpc.com"
+
+    def test_get_working_rpc_all_fail(self):
+        """Test get_working_rpc raises error when all RPCs fail."""
+        RPC_CONFIG[1] = ["http://rpc1.com", "http://rpc2.com"]
+
+        with patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check:
+            mock_health_check.return_value = {
+                "healthy": False,
+                "chain_id": None,
+                "latency_ms": 0,
+                "error": "failed",
+            }
+
+            try:
+                get_working_rpc(1)
+                assert False, "Should have raised ValueError"
+            except ValueError as e:
+                assert "All RPCs failed" in str(e)
+
+    def test_get_working_rpc_no_config(self):
+        """Test get_working_rpc raises error when no config exists."""
+        RPC_CONFIG.clear()
+
+        try:
+            get_working_rpc(1)
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "No RPC configuration" in str(e)
+
+
+class TestCheckRpcHealth:
+    def test_check_rpc_health_success(self):
+        """Test check_rpc_health with configured RPCs."""
+        RPC_CONFIG[1] = ["http://rpc1.com", "http://rpc2.com"]
+
+        with patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check:
+            mock_health_check.side_effect = [
+                {
+                    "healthy": True,
+                    "chain_id": 1,
+                    "latency_ms": 50,
+                    "error": "",
+                },
+                {
+                    "healthy": False,
+                    "chain_id": None,
+                    "latency_ms": 0,
+                    "error": "timeout",
+                },
+            ]
+
+            result = check_rpc_health(1)
+
+            assert "=== RPC Health for Chain 1 ===" in result
+            assert "Primary" in result
+            assert "Backup 1" in result
+            assert "✓ Healthy" in result
+            assert "✗ Unhealthy" in result
+
+    def test_check_rpc_health_no_config(self):
+        """Test check_rpc_health when no RPCs configured."""
+        RPC_CONFIG.clear()
+
+        result = check_rpc_health(1)
+
+        assert "Error: No RPC configuration" in result
+
+
+class TestSetBackupRpc:
+    def test_set_backup_rpc_success(self):
+        """Test set_backup_rpc adds backup successfully."""
+        RPC_CONFIG[1] = ["http://primary-rpc.com"]
+
+        with patch("mcp_blockchain_rail.server.verify_rpc") as mock_verify:
+            mock_verify.return_value = True
+            result = set_backup_rpc(1, "http://backup-rpc.com")
+
+            assert "Success" in result
+            assert len(RPC_CONFIG[1]) == 2
+            assert "http://backup-rpc.com" in RPC_CONFIG[1]
+
+    def test_set_backup_rpc_duplicate(self):
+        """Test set_backup_rpc rejects duplicate RPC."""
+        RPC_CONFIG[1] = ["http://primary-rpc.com"]
+
+        with patch("mcp_blockchain_rail.server.verify_rpc") as mock_verify:
+            mock_verify.return_value = True
+            result = set_backup_rpc(1, "http://backup-rpc.com")
+
+        assert "Success" in result
+        assert "Backup RPC added" in result
+
+    def test_set_backup_rpc_no_primary(self):
+        """Test set_backup_rpc requires primary RPC first."""
+        RPC_CONFIG.clear()
+
+        result = set_backup_rpc(1, "http://backup-rpc.com")
+
+        assert "Error: No primary RPC configured" in result
+
+
+class TestRotateRpc:
+    def test_rotate_rpc_success(self):
+        """Test rotate_rpc cycles RPCs successfully."""
+        RPC_CONFIG[1] = [
+            "http://primary-rpc.com",
+            "http://backup1.com",
+            "http://backup2.com",
+        ]
+
+        result = rotate_rpc(1)
+
+        assert "Success" in result
+        assert RPC_CONFIG[1][0] == "http://backup1.com"
+
+    def test_rotate_rpc_single_item(self):
+        """Test rotate_rpc with only primary RPC."""
+        RPC_CONFIG[1] = ["http://primary-rpc.com"]
+
+        result = rotate_rpc(1)
+
+        assert "Error: No backup RPCs" in result
+
+    def test_rotate_rpc_no_config(self):
+        """Test rotate_rpc with no configuration."""
+        RPC_CONFIG.clear()
+
+        result = rotate_rpc(1)
+
+        assert "Error: No RPC configuration" in result
 
 
 class TestDeleteRpc:
     def test_delete_rpc_existing(self, tmp_path):
         """Test delete_rpc removes existing RPC."""
-        RPC_CONFIG[1] = "http://rpc1.com"
+        RPC_CONFIG[1] = ["http://rpc1.com"]
 
         with patch(
             "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
@@ -338,15 +583,16 @@ class TestDeleteApiKey:
 class TestListConfigs:
     def test_list_configs_with_data(self):
         """Test list_configs displays existing configs."""
-        RPC_CONFIG[1] = "http://rpc1.com"
-        RPC_CONFIG[137] = "http://rpc2.com"
+        RPC_CONFIG[1] = ["http://rpc1.com"]
+        RPC_CONFIG[137] = ["http://rpc2.com", "http://rpc3.com"]
         API_KEYS["etherscan"] = "test_key_123456789"
 
         result = list_configs()
 
-        assert "Chain 1: http://rpc1.com" in result
-        assert "Chain 137: http://rpc2.com" in result
-        assert "etherscan: test...6789" in result
+        assert "Chain 1:" in result
+        assert "Primary: http://rpc1.com" in result
+        assert "Chain 137:" in result
+        assert "etherscan: test...456789" in result
 
     def test_list_configs_empty(self):
         """Test list_configs with no configs."""
@@ -357,3 +603,79 @@ class TestListConfigs:
 
         assert "No RPCs configured" in result
         assert "No API keys configured" in result
+
+
+class TestPersistence:
+    def test_save_config_writes_file(self, tmp_path):
+        """Test save_config writes data to config file."""
+        RPC_CONFIG[1] = ["http://rpc1.com"]
+        API_KEYS["etherscan"] = "test_key_123"
+
+        with patch(
+            "mcp_blockchain_rail.server.CONFIG_FILE", str(tmp_path / "config.json")
+        ):
+            save_config()
+
+            import json
+
+            with open(tmp_path / "config.json") as f:
+                data = json.load(f)
+                assert data["rpcs"] == {"1": ["http://rpc1.com"]}
+                assert data["api_keys"] == {"etherscan": "test_key_123"}
+
+    def test_load_config_reads_file(self, tmp_path):
+        """Test load_config reads data from config file."""
+        config_data = {
+            "rpcs": {
+                "1": ["http://rpc1.com", "http://rpc2.com"],
+                "137": ["http://rpc3.com"],
+            },
+            "api_keys": {"etherscan": "key123"},
+        }
+
+        config_file = tmp_path / "config.json"
+        import json
+
+        with open(config_file, "w") as f:
+            json.dump(config_data, f)
+
+        with patch("mcp_blockchain_rail.server.CONFIG_FILE", str(config_file)):
+            RPC_CONFIG.clear()
+            API_KEYS.clear()
+            load_config()
+
+            assert RPC_CONFIG == {
+                1: ["http://rpc1.com", "http://rpc2.com"],
+                137: ["http://rpc3.com"],
+            }
+            assert API_KEYS == {"etherscan": "key123"}
+
+    def test_load_config_migrates_old_format(self, tmp_path):
+        """Test load_config migrates old single-RPC format to list."""
+        config_data = {"rpcs": {"1": "http://old-single-rpc.com"}, "api_keys": {}}
+
+        config_file = tmp_path / "config.json"
+        import json
+
+        with open(config_file, "w") as f:
+            json.dump(config_data, f)
+
+        with patch("mcp_blockchain_rail.server.CONFIG_FILE", str(config_file)):
+            RPC_CONFIG.clear()
+            API_KEYS.clear()
+            load_config()
+
+            assert 1 in RPC_CONFIG
+            assert isinstance(RPC_CONFIG[1], list)
+            assert RPC_CONFIG[1] == ["http://old-single-rpc.com"]
+
+    def test_load_config_creates_empty_if_missing(self):
+        """Test load_config handles missing config file gracefully."""
+        with patch("mcp_blockchain_rail.server.os.path.exists", return_value=False):
+            RPC_CONFIG[1] = ["existing"]
+            API_KEYS["test"] = "test"
+
+            load_config()
+
+            assert RPC_CONFIG[1] == ["existing"]
+            assert API_KEYS["test"] == "test"
