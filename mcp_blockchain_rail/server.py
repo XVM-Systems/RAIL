@@ -10,7 +10,60 @@ from web3 import Web3
 
 mcp = FastMCP("mcp-blockchain-rail")
 
-RPC_CONFIG: dict[int, str] = {}
+RPC_CONFIG: dict[int, list[str]] = {}
+MAX_BACKUPS = 2
+
+
+def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
+    """Check RPC health and return detailed status.
+
+    Args:
+        rpc_url: The RPC URL to check.
+        chain_id: The expected chain ID.
+        timeout: Timeout in seconds.
+
+    Returns:
+        dict with keys: healthy (bool), chain_id (int),
+        latency_ms (int), error (str)
+    """
+    try:
+        start_time = time.time()
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
+        if not w3.is_connected():
+            return {
+                "healthy": False,
+                "chain_id": None,
+                "latency_ms": 0,
+                "error": "Not connected",
+            }
+
+        if w3.eth.chain_id != chain_id:
+            return {
+                "healthy": False,
+                "chain_id": w3.eth.chain_id,
+                "latency_ms": 0,
+                "error": f"Wrong chain ID (expected {chain_id})",
+            }
+
+        w3.eth.get_balance(
+            Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+        )
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        return {
+            "healthy": True,
+            "chain_id": chain_id,
+            "latency_ms": latency_ms,
+            "error": "",
+        }
+    except Exception as e:
+        return {
+            "healthy": False,
+            "chain_id": None,
+            "latency_ms": 0,
+            "error": str(e),
+        }
+
 
 CHAIN_LIST_URL = "https://chainid.network/chains.json"
 CACHE_FILE = "chain_cache.json"
@@ -32,8 +85,12 @@ def load_config() -> None:
                 config_data = json.load(f)
                 rpcs = config_data.get("rpcs", {})
                 API_KEYS.update(config_data.get("api_keys", {}))
-                for chain_id_str, rpc_url in rpcs.items():
-                    RPC_CONFIG[int(chain_id_str)] = rpc_url
+                for chain_id_str, rpc_value in rpcs.items():
+                    chain_id = int(chain_id_str)
+                    if isinstance(rpc_value, str):
+                        RPC_CONFIG[chain_id] = [rpc_value]
+                    elif isinstance(rpc_value, list):
+                        RPC_CONFIG[chain_id] = rpc_value
     except Exception:
         pass
 
@@ -49,8 +106,56 @@ def save_config() -> None:
         pass
 
 
+def get_working_rpc(chain_id: int) -> str:
+    """Get a working RPC for a chain with automatic failover.
+
+    Tries primary RPC first, then backups in order. Promotes working
+    backup to primary position on success. Logs failover events.
+
+    Args:
+        chain_id: The chain ID to get a working RPC for.
+
+    Returns:
+        str: A working RPC URL.
+
+    Raises:
+        ValueError: If no RPCs configured or all RPCs fail.
+    """
+    if chain_id not in RPC_CONFIG:
+        raise ValueError(f"No RPC configuration for chain ID {chain_id}")
+
+    rpcs = RPC_CONFIG[chain_id]
+    failed_rpcs: list[str] = []
+
+    for i, rpc_url in enumerate(rpcs):
+        if rpc_url in failed_rpcs:
+            continue
+
+        result = health_check_rpc(rpc_url, chain_id, timeout=5)
+
+        if result["healthy"]:
+            if i > 0:
+                print(f"Failover: Using backup RPC for chain {chain_id}: {rpc_url}")
+
+            if i > 0:
+                RPC_CONFIG[chain_id] = [rpc_url] + [
+                    r for r in rpcs if r not in [rpc_url] + failed_rpcs
+                ]
+                save_config()
+
+            return rpc_url
+
+        failed_rpcs.append(rpc_url)
+
+    error_list = ", ".join(failed_rpcs[:3])
+    raise ValueError(
+        f"All RPCs failed for chain {chain_id}. "
+        f"Tried: {error_list}{'...' if len(failed_rpcs) > 3 else ''}"
+    )
+
+
 def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
-    """Helper to verify if an RPC is reachable, on the correct chain, and
+    """Helper to verify if an RPC is reachable, on correct chain, and
     can read state.
     """
     try:
@@ -73,8 +178,9 @@ def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
 @mcp.tool()
 def set_rpc(chain_id: int, rpc_url: str) -> str:
     """
-    Set the RPC URL for a specific chain ID.
+    Set the primary RPC URL for a specific chain ID.
     Validates the RPC URL by checking if it's accessible and matches the chain ID.
+    If chain already exists, new RPC becomes primary and old ones become backups.
 
     Args:
         chain_id: The chain ID to set the RPC for.
@@ -82,7 +188,12 @@ def set_rpc(chain_id: int, rpc_url: str) -> str:
     """
     try:
         if verify_rpc(rpc_url, chain_id, timeout=10):
-            RPC_CONFIG[chain_id] = rpc_url
+            if chain_id in RPC_CONFIG:
+                existing_rpcs = RPC_CONFIG[chain_id]
+                new_config = [rpc_url] + existing_rpcs
+                RPC_CONFIG[chain_id] = new_config[: MAX_BACKUPS + 1]
+            else:
+                RPC_CONFIG[chain_id] = [rpc_url]
             save_config()
             return f"Success: RPC URL for chain ID {chain_id} set to {rpc_url}"
         else:
@@ -175,12 +286,10 @@ def check_native_balance(chain_id: int, address: str) -> str:
         chain_id: The chain ID of the network.
         address: The address to check balance for.
     """
-    rpc_url = RPC_CONFIG.get(chain_id)
-    if not rpc_url:
-        return (
-            f"Error: No RPC URL configured for chain ID {chain_id}. "
-            f"Please use set_rpc({chain_id}, 'YOUR_RPC_URL') first."
-        )
+    try:
+        rpc_url = get_working_rpc(chain_id)
+    except ValueError as e:
+        return str(e)
 
     try:
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
@@ -226,7 +335,7 @@ def set_api_key(provider: str, key: str) -> str:
 @mcp.tool()
 def delete_rpc(chain_id: int) -> str:
     """
-    Delete the RPC URL configuration for a specific chain ID.
+    Delete the RPC configuration for a specific chain ID.
 
     Args:
         chain_id: The chain ID to remove the RPC configuration for.
@@ -263,8 +372,13 @@ def list_configs() -> str:
     lines = []
     lines.append("=== RPC Configuration ===")
     if RPC_CONFIG:
-        for chain_id, rpc_url in RPC_CONFIG.items():
-            lines.append(f"  Chain {chain_id}: {rpc_url}")
+        for chain_id, rpc_list in RPC_CONFIG.items():
+            primary = rpc_list[0] if rpc_list else "None"
+            backups = ", ".join(rpc_list[1:]) if len(rpc_list) > 1 else "None"
+            lines.append(f"  Chain {chain_id}:")
+            lines.append(f"    Primary: {primary}")
+            if backups != "None":
+                lines.append(f"    Backups: {backups}")
     else:
         lines.append("  No RPCs configured.")
 
@@ -277,6 +391,96 @@ def list_configs() -> str:
         lines.append("  No API keys configured.")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def check_rpc_health(chain_id: int) -> str:
+    """
+    Check the health status of all configured RPCs for a chain.
+
+    Args:
+        chain_id: The chain ID to check RPC health for.
+    """
+    if chain_id not in RPC_CONFIG:
+        return f"Error: No RPC configuration for chain ID {chain_id}."
+
+    rpcs = RPC_CONFIG[chain_id]
+    lines = [f"=== RPC Health for Chain {chain_id} ==="]
+
+    for i, rpc_url in enumerate(rpcs):
+        role = "Primary" if i == 0 else f"Backup {i}"
+        result = health_check_rpc(rpc_url, chain_id, timeout=5)
+
+        if result["healthy"]:
+            status = (
+                f"✓ Healthy (latency: {result['latency_ms']}ms, "
+                f"chain_id: {result['chain_id']})"
+            )
+        else:
+            status = f"✗ Unhealthy (error: {result['error']})"
+
+        lines.append(f"  [{role}] {rpc_url}")
+        lines.append(f"    Status: {status}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def set_backup_rpc(chain_id: int, rpc_url: str) -> str:
+    """
+    Add a backup RPC URL for a specific chain ID.
+    Validates the RPC URL before adding.
+
+    Args:
+        chain_id: The chain ID to add the backup RPC for.
+        rpc_url: The backup RPC URL to add.
+    """
+    if chain_id not in RPC_CONFIG:
+        return (
+            f"Error: No primary RPC configured for chain ID {chain_id}. "
+            f"Use set_rpc({chain_id}, 'PRIMARY_RPC_URL') first."
+        )
+
+    if verify_rpc(rpc_url, chain_id, timeout=10):
+        existing_rpcs = RPC_CONFIG[chain_id]
+        if rpc_url in existing_rpcs:
+            return f"Error: RPC URL {rpc_url} already configured for chain {chain_id}."
+
+        new_config = existing_rpcs + [rpc_url]
+        RPC_CONFIG[chain_id] = new_config[: MAX_BACKUPS + 1]
+        save_config()
+        return (
+            f"Success: Backup RPC added for chain {chain_id}. "
+            f"Total RPCs: {len(RPC_CONFIG[chain_id])}"
+        )
+    else:
+        return (
+            f"Error: RPC URL {rpc_url} is unreachable or belongs to a "
+            f"different chain ID."
+        )
+
+
+@mcp.tool()
+def rotate_rpc(chain_id: int) -> str:
+    """
+    Rotate to the next backup RPC for a chain.
+    Cycles current primary to the end of the backup list.
+
+    Args:
+        chain_id: The chain ID to rotate RPCs for.
+    """
+    if chain_id not in RPC_CONFIG:
+        return f"Error: No RPC configuration for chain ID {chain_id}."
+
+    rpcs = RPC_CONFIG[chain_id]
+    if len(rpcs) <= 1:
+        return f"Error: No backup RPCs to rotate to for chain {chain_id}."
+
+    new_config = rpcs[1:] + [rpcs[0]]
+    RPC_CONFIG[chain_id] = new_config
+    save_config()
+    new_primary = new_config[0]
+    return f"Success: Rotated to new primary RPC for chain {chain_id}: {new_primary}"
 
 
 @mcp.tool()
