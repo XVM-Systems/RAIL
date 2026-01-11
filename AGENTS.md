@@ -42,12 +42,16 @@ RAIL/
 3. `check_native_balance(chain_id, address)` - Query ETH balance
 4. `set_api_key(provider, key)` - Configure explorer API keys
 5. `get_source_code(chain_id, contract_address)` - Fetch verified contract code
+6. `delete_rpc(chain_id)` - Delete RPC configuration for a chain
+7. `delete_api_key(provider)` - Delete API key for a provider
+8. `list_configs()` - List all saved configurations
 
 ### Important Patterns
 - **RPC Validation**: All RPCs are verified for connectivity and chain ID matching before use
 - **Caching**: ChainList data is cached locally for 1 hour (`chain_cache.json`)
 - **Parallel Verification**: RPCs are verified concurrently using ThreadPoolExecutor
 - **Fallback Strategy**: Source code fetch tries Sourcify first, then Etherscan
+- **Configuration Persistence**: RPCs and API keys are saved to `rail_config.json` and automatically loaded on startup
 
 ## Development Workflow
 
@@ -130,14 +134,15 @@ def tool_name(param1: type, param2: type) -> str:
 - RPC URLs are stored in the global `RPC_CONFIG` dictionary keyed by chain_id
 - Always validate RPCs before storing them using `verify_rpc()`
 - Use Web3 HTTPProvider with timeout configuration
+- Configurations are automatically persisted to `rail_config.json` and loaded on startup
 
 ## Known Limitations & Areas for Improvement
 
 ### Current Limitations
-1. **State Management**: RPC_CONFIG and API_KEYS are in-memory only (lost on restart)
-2. **Error Handling**: Some error cases could be more specific
-3. **Configuration**: Hard-coded values (CACHE_DURATION, timeouts)
-4. **Logging**: No structured logging system
+1. **Error Handling**: Some error cases could be more specific
+2. **Configuration**: Hard-coded values (CACHE_DURATION, timeouts)
+3. **Logging**: No structured logging system
+4. **Security**: API keys stored in plain text (do not commit `rail_config.json`)
 
 ### Potential Improvements
 1. **Persistence**: Save RPC configs and API keys to disk (encrypted)
@@ -186,7 +191,8 @@ When adding new MCP tools:
 5. Handle all exceptions gracefully
 6. Return error messages with `"Error: "` prefix
 7. Use existing global configs (RPC_CONFIG, API_KEYS) where appropriate
-8. Add test cases to the `tests/` directory
+8. Call `save_config()` after modifying RPC_CONFIG or API_KEYS to persist changes
+9. Add test cases to the `tests/` directory
 
 ## Chain Support
 
@@ -196,8 +202,9 @@ The server is chain-agnostic and works with any EVM-compatible chain. Test chain
 
 ## Security Considerations
 
-1. **API Keys**: Never commit API keys to the repository
-2. **RPC URLs**: Validate RPCs before using them (checks chain ID and connectivity)
-3. **User Input**: Always validate and checksum addresses using `Web3.to_checksum_address()`
-4. **Timeouts**: Use appropriate timeouts on all network requests
-5. **Error Messages**: Don't expose sensitive information in error messages
+1. **API Keys**: Never commit API keys to the repository. The `rail_config.json` file contains API keys in plain text and is already in `.gitignore`.
+2. **Plain Text Storage**: API keys are stored in plain text in `rail_config.json`. Do not share this file or add encryption for production use.
+3. **RPC URLs**: Validate RPCs before using them (checks chain ID and connectivity)
+4. **User Input**: Always validate and checksum addresses using `Web3.to_checksum_address()`
+5. **Timeouts**: Use appropriate timeouts on all network requests
+6. **Error Messages**: Don't expose sensitive information in error messages
