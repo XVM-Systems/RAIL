@@ -1,0 +1,10 @@
+{
+  "rpcs": {
+    "1": [
+      "http://backup1.com",
+      "http://backup2.com",
+      "http://primary-rpc.com"
+    ]
+  },
+  "api_keys": {}
+}
