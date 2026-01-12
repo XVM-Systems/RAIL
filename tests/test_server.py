@@ -1,5 +1,4 @@
 from unittest.mock import MagicMock, patch
-
 from mcp_blockchain_rail.server import (
     RPC_CONFIG,
     API_KEYS,
@@ -20,6 +19,7 @@ from mcp_blockchain_rail.server import (
     rotate_rpc,
     get_token_balance,
     get_token_info,
+    setup_encryption,
 )
 
 
