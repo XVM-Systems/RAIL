@@ -618,6 +618,60 @@ def get_token_info(chain_id: int, token_address: str) -> str:
         return f"Error fetching token info: {str(e)}"
 
 
+@mcp.tool()
+def setup_encryption(password: str | None = None) -> str:
+    """
+    Setup encryption for API keys. Mandatory for all keys.
+
+    Args:
+        password: Encryption password. If not provided, prompts interactively.
+
+    Returns:
+        Success message or error.
+    """
+    from mcp_blockchain_rail.crypto import EncryptionManager, generate_salt
+    from mcp_blockchain_rail.config_manager import get_config_manager
+    from mcp_blockchain_rail.logging_config import get_logger
+    import base64
+    import os
+
+    if not password:
+        password = os.getenv("RAIL_ENCRYPTION_KEY")
+
+    if not password:
+        import getpass
+
+        password = getpass.getpass("Enter encryption password: ")
+
+    if not password:
+        return "Error: Encryption password required. Use --password or RAIL_ENCRYPTION_KEY env var."
+
+    try:
+        config_manager = get_config_manager()
+        encryption_manager = EncryptionManager.from_password(password)
+
+        # Encrypt all existing API keys
+        api_keys = config_manager.get("api_keys") or {}
+        encrypted_keys = {}
+
+        for provider, key in api_keys.items():
+            encrypted_key = encryption_manager.encrypt(key)
+            encrypted_keys[provider] = encrypted_key
+
+        # Update config with encrypted keys and salt
+        config_manager.set("api_keys", encrypted_keys)
+        config_manager.set(
+            "encryption",
+            {"enabled": True, "salt": encryption_manager.get_salt_base64()},
+        )
+
+        config_manager.save()
+
+        return f"Success: Encryption enabled. All {len(encrypted_keys)} API key(s) encrypted."
+    except Exception as e:
+        return f"Error setting up encryption: {str(e)}"
+
+
 def main() -> None:
     mcp.run()
 
