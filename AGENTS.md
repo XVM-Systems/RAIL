@@ -8,6 +8,9 @@ RAIL is an MCP (Model Context Protocol) Server for EVM blockchain interactions. 
 RAIL/
 ├── mcp_blockchain_rail/
 │   ├── __init__.py
+│   ├── erc20_abi/
+│   │   ├── __init__.py
+│   │   └── erc20_abi.py  # ERC-20 ABI and helper functions
 │   └── server.py          # Main MCP server implementation
 ├── tests/
 │   ├── __init__.py
@@ -61,6 +64,7 @@ RAIL/
 - **Fallback Strategy**: Source code fetch tries Sourcify first, then Etherscan
 - **Configuration Persistence**: RPCs and API keys are saved to `rail_config.json` and automatically loaded on startup
 - **Multiple Backups**: Each chain stores primary + up to 2 backup RPCs (3 total)
+- **ERC-20 Operations**: Token queries use `call_erc20_read()` helper with automatic RPC failover and proper decimal formatting
 
 ## Development Workflow
 
@@ -156,21 +160,20 @@ def tool_name(param1: type, param2: type) -> str:
 ### Potential Improvements
 1. **Persistence**: Save RPC configs and API keys to disk (encrypted)
 2. **Expanded Functionality**:
-   - ERC-20 token balance queries
-   - Transaction sending
-   - Contract interaction (read/write functions)
-   - Gas price estimation
-   - Block information queries
-   - Transaction receipt queries
+    - Transaction sending
+    - Contract interaction (read/write functions beyond ERC-20)
+    - Gas price estimation
+    - Block information queries
+    - Transaction receipt queries
 3. **Performance**:
-   - Connection pooling for RPC endpoints
-   - Longer cache duration with TTL-based invalidation
+    - Connection pooling for RPC endpoints
+    - Longer cache duration with TTL-based invalidation
 4. **Reliability**:
-   - Automatic RPC failover when configured RPC goes down
-   - Health checks for stored RPCs
+    - Automatic RPC failover when configured RPC goes down
+    - Health checks for stored RPCs
 5. **Developer Experience**:
-    - Configuration file support (YAML/TOML)
-    - CLI for managing RPCs and API keys
+     - Configuration file support (YAML/TOML)
+     - CLI for managing RPCs and API keys
 
 ## External APIs Used
 

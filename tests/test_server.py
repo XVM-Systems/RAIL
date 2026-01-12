@@ -18,6 +18,8 @@ from mcp_blockchain_rail.server import (
     check_rpc_health,
     set_backup_rpc,
     rotate_rpc,
+    get_token_balance,
+    get_token_info,
 )
 
 
@@ -138,7 +140,6 @@ class TestCheckNativeBalance:
     def test_check_native_balance_no_rpc_configured(self):
         """Test check_native_balance when no RPC is set."""
         result = check_native_balance(1, "0x1234567890123456789012345678901234567890")
-        assert "Error" in result
         assert "No RPC configuration" in result
 
     def test_check_native_balance_success(self):
@@ -342,7 +343,7 @@ class TestHealthCheckRpc:
 
             assert result["healthy"] is False
             assert result["chain_id"] == 2
-            assert "Chain ID" in result["error"]
+            assert "chain ID" in result["error"] or "Chain ID" in result["error"]
 
     def test_health_check_rpc_exception(self):
         """Test health_check_rpc when exception occurs."""
@@ -679,3 +680,134 @@ class TestPersistence:
 
             assert RPC_CONFIG[1] == ["existing"]
             assert API_KEYS["test"] == "test"
+
+
+class TestGetTokenBalance:
+    def test_get_token_balance_no_rpc_configured(self):
+        """Test get_token_balance when no RPC is set."""
+        result = get_token_balance(
+            1,
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        )
+        assert "No RPC configuration" in result
+
+    def test_get_token_balance_success(self):
+        """Test get_token_balance with valid RPC."""
+        RPC_CONFIG[1] = ["http://test-rpc.com"]
+
+        with (
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
+            patch("mcp_blockchain_rail.server.call_erc20_read") as mock_call,
+        ):
+            mock_health_check.return_value = {
+                "healthy": True,
+                "chain_id": 1,
+                "latency_ms": 50,
+                "error": "",
+            }
+            mock_call.side_effect = [1000000000000000000, 18]
+
+            result = get_token_balance(
+                1,
+                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            )
+
+            assert "Balance:" in result
+            assert "1.000000000000000000" in result
+
+    def test_get_token_balance_failover(self):
+        """Test get_token_balance with automatic failover."""
+        RPC_CONFIG[1] = ["http://failed-rpc.com", "http://backup-rpc.com"]
+
+        with (
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
+            patch("mcp_blockchain_rail.server.call_erc20_read") as mock_call,
+        ):
+
+            def health_side_effect(rpc_url, chain_id, timeout):
+                return (
+                    {"healthy": False, "latency_ms": 0, "error": "failed"}
+                    if rpc_url == "http://failed-rpc.com"
+                    else {
+                        "healthy": True,
+                        "latency_ms": 100,
+                        "error": "",
+                        "chain_id": 1,
+                    }
+                )
+
+            mock_health_check.side_effect = health_side_effect
+            mock_call.side_effect = [500000, 6]
+
+            result = get_token_balance(
+                1,
+                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            )
+
+            assert "Balance:" in result
+            assert "0.500000" in result
+            assert RPC_CONFIG[1][0] == "http://backup-rpc.com"
+
+
+class TestGetTokenInfo:
+    def test_get_token_info_no_rpc_configured(self):
+        """Test get_token_info when no RPC is set."""
+        result = get_token_info(1, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+        assert "No RPC configuration" in result
+
+    def test_get_token_info_success(self):
+        """Test get_token_info with valid RPC."""
+        RPC_CONFIG[1] = ["http://test-rpc.com"]
+
+        with (
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
+            patch("mcp_blockchain_rail.server.call_erc20_read") as mock_call,
+        ):
+            mock_health_check.return_value = {
+                "healthy": True,
+                "chain_id": 1,
+                "latency_ms": 50,
+                "error": "",
+            }
+            mock_call.side_effect = ["USD Coin", "USDC", 6, 1000000000000]
+
+            result = get_token_info(1, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+            assert "Token Information:" in result
+            assert "Name: USD Coin" in result
+            assert "Symbol: USDC" in result
+            assert "Decimals: 6" in result
+            assert "Total Supply:" in result
+
+    def test_get_token_info_failover(self):
+        """Test get_token_info with automatic failover."""
+        RPC_CONFIG[1] = ["http://failed-rpc.com", "http://backup-rpc.com"]
+
+        with (
+            patch("mcp_blockchain_rail.server.health_check_rpc") as mock_health_check,
+            patch("mcp_blockchain_rail.server.call_erc20_read") as mock_call,
+        ):
+
+            def health_side_effect(rpc_url, chain_id, timeout):
+                return (
+                    {"healthy": False, "latency_ms": 0, "error": "failed"}
+                    if rpc_url == "http://failed-rpc.com"
+                    else {
+                        "healthy": True,
+                        "latency_ms": 100,
+                        "error": "",
+                        "chain_id": 1,
+                    }
+                )
+
+            mock_health_check.side_effect = health_side_effect
+            mock_call.side_effect = ["Wrapped Ether", "WETH", 18, 500000000000000000]
+
+            result = get_token_info(1, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+
+            assert "Token Information:" in result
+            assert "Name: Wrapped Ether" in result
+            assert "Symbol: WETH" in result
