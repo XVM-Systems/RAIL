@@ -8,12 +8,39 @@ import requests
 from mcp.server.fastmcp import FastMCP
 from web3 import Web3
 
+from mcp_blockchain_rail.config_manager import get_config_manager
 from mcp_blockchain_rail.erc20_abi import call_erc20_read
+from mcp_blockchain_rail.exceptions import (
+    ConfigError,
+)
+from mcp_blockchain_rail.logging_config import (
+    get_logger,
+    log_with_context,
+    setup_logging,
+)
+from mcp_blockchain_rail.validators import (
+    mask_address,
+    mask_url,
+    validate_address,
+    validate_chain_id,
+    validate_rpc_url,
+)
+
+config_manager = get_config_manager()
+logger = get_logger(__name__)
+setup_logging(
+    level=config_manager.get("logging", "level"),
+    log_file=config_manager.get("logging", "file"),
+)
 
 mcp = FastMCP("mcp-blockchain-rail")
 
 RPC_CONFIG: dict[int, list[str]] = {}
-MAX_BACKUPS = 2
+MAX_BACKUPS = config_manager.get("rpc", "max_backups")
+
+CHAIN_LIST_URL = config_manager.get("api", "chain_list_url")
+CACHE_FILE = config_manager.get("cache", "file")
+CACHE_DURATION = config_manager.get("cache", "duration")
 
 
 def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
@@ -32,6 +59,12 @@ def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
         start_time = time.time()
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
         if not w3.is_connected():
+            log_with_context(
+                logger,
+                logging.WARNING,
+                "RPC not connected",
+                {"rpc_url": mask_url(rpc_url)},
+            )
             return {
                 "healthy": False,
                 "chain_id": None,
@@ -40,6 +73,16 @@ def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
             }
 
         if w3.eth.chain_id != chain_id:
+            log_with_context(
+                logger,
+                logging.WARNING,
+                "RPC wrong chain ID",
+                {
+                    "rpc_url": mask_url(rpc_url),
+                    "expected": chain_id,
+                    "actual": w3.eth.chain_id,
+                },
+            )
             return {
                 "healthy": False,
                 "chain_id": w3.eth.chain_id,
@@ -52,6 +95,16 @@ def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
         )
         latency_ms = int((time.time() - start_time) * 1000)
 
+        log_with_context(
+            logger,
+            logging.INFO,
+            "RPC health check passed",
+            {
+                "rpc_url": mask_url(rpc_url),
+                "latency_ms": latency_ms,
+            },
+        )
+
         return {
             "healthy": True,
             "chain_id": chain_id,
@@ -59,6 +112,15 @@ def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
             "error": "",
         }
     except Exception as e:
+        log_with_context(
+            logger,
+            logging.ERROR,
+            "RPC health check failed",
+            {
+                "rpc_url": mask_url(rpc_url),
+                "error": str(e),
+            },
+        )
         return {
             "healthy": False,
             "chain_id": None,
@@ -67,34 +129,26 @@ def health_check_rpc(rpc_url: str, chain_id: int, timeout: int = 5) -> dict:
         }
 
 
-CHAIN_LIST_URL = "https://chainid.network/chains.json"
-CACHE_FILE = "chain_cache.json"
-CACHE_DURATION = 3600
-
-CONFIG_FILE = "rail_config.json"
-
-NOTE_API_KEYS_SECURITY = (
-    "SECURITY WARNING: API keys are stored in plain text. "
-    "Do not commit this file to version control."
-)
-
-
 def load_config() -> None:
     """Load RPC configs and API keys from config file."""
     try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE) as f:
-                config_data = json.load(f)
-                rpcs = config_data.get("rpcs", {})
-                API_KEYS.update(config_data.get("api_keys", {}))
-                for chain_id_str, rpc_value in rpcs.items():
-                    chain_id = int(chain_id_str)
-                    if isinstance(rpc_value, str):
-                        RPC_CONFIG[chain_id] = [rpc_value]
-                    elif isinstance(rpc_value, list):
-                        RPC_CONFIG[chain_id] = rpc_value
-    except Exception:
-        pass
+        config_file = config_manager.config_path
+        if os.path.exists(config_file):
+            logger.info(f"Loading config from {config_file}")
+            config_manager.load()
+
+            rpcs = config_manager.get("rpcs") or {}
+            for chain_id_str, rpc_value in rpcs.items():
+                chain_id = int(chain_id_str)
+                if isinstance(rpc_value, str):
+                    RPC_CONFIG[chain_id] = [rpc_value]
+                elif isinstance(rpc_value, list):
+                    RPC_CONFIG[chain_id] = rpc_value
+
+            api_keys = config_manager.get("api_keys") or {}
+            API_KEYS.update(api_keys)
+    except Exception as e:
+        logger.error(f"Failed to load config: {e}")
 
 
 def save_config() -> None:
@@ -102,10 +156,13 @@ def save_config() -> None:
     try:
         rpcs_as_strings = {str(k): v for k, v in RPC_CONFIG.items()}
         config_data = {"rpcs": rpcs_as_strings, "api_keys": API_KEYS}
-        with open(CONFIG_FILE, "w") as f:
+
+        with open(config_manager.config_path, "w") as f:
             json.dump(config_data, f, indent=2)
-    except Exception:
-        pass
+
+        logger.info("Configuration saved")
+    except Exception as e:
+        logger.error(f"Failed to save config: {e}")
 
 
 def get_working_rpc(chain_id: int) -> str:
@@ -123,6 +180,8 @@ def get_working_rpc(chain_id: int) -> str:
     Raises:
         ValueError: If no RPCs configured or all RPCs fail.
     """
+    validate_chain_id(chain_id)
+
     if chain_id not in RPC_CONFIG:
         raise ValueError(f"No RPC configuration for chain ID {chain_id}")
 
@@ -137,7 +196,17 @@ def get_working_rpc(chain_id: int) -> str:
 
         if result["healthy"]:
             if i > 0:
-                print(f"Failover: Using backup RPC for chain {chain_id}: {rpc_url}")
+                log_with_context(
+                    logger,
+                    logging.INFO,
+                    "Failover: Using backup RPC",
+                    {
+                        "chain_id": chain_id,
+                        "old_rpc": mask_url(rpcs[0]),
+                        "new_rpc": mask_url(rpc_url),
+                        "index": i,
+                    },
+                )
 
             if i > 0:
                 RPC_CONFIG[chain_id] = [rpc_url] + [
@@ -149,7 +218,7 @@ def get_working_rpc(chain_id: int) -> str:
 
         failed_rpcs.append(rpc_url)
 
-    error_list = ", ".join(failed_rpcs[:3])
+    error_list = ", ".join([mask_url(r) for r in failed_rpcs[:3]])
     raise ValueError(
         f"All RPCs failed for chain {chain_id}. "
         f"Tried: {error_list}{'...' if len(failed_rpcs) > 3 else ''}"
@@ -161,6 +230,8 @@ def verify_rpc(rpc_url: str, chain_id: int, timeout: int = 3) -> bool:
     can read state.
     """
     try:
+        validate_rpc_url(rpc_url)
+
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
         if not w3.is_connected():
             return False
@@ -189,6 +260,9 @@ def set_rpc(chain_id: int, rpc_url: str) -> str:
         rpc_url: The RPC URL to use.
     """
     try:
+        validate_chain_id(chain_id)
+        validate_rpc_url(rpc_url)
+
         if verify_rpc(rpc_url, chain_id, timeout=10):
             if chain_id in RPC_CONFIG:
                 existing_rpcs = RPC_CONFIG[chain_id]
@@ -197,13 +271,46 @@ def set_rpc(chain_id: int, rpc_url: str) -> str:
             else:
                 RPC_CONFIG[chain_id] = [rpc_url]
             save_config()
+
+            log_with_context(
+                logger,
+                logging.INFO,
+                "RPC set for chain",
+                {
+                    "chain_id": chain_id,
+                    "rpc_url": mask_url(rpc_url),
+                    "config_count": len(RPC_CONFIG[chain_id]),
+                },
+            )
+
             return f"Success: RPC URL for chain ID {chain_id} set to {rpc_url}"
         else:
-            return (
-                f"Error: RPC URL {rpc_url} is unreachable or belongs to a "
-                f"different chain ID."
+            error_msg = (
+                f"Error: RPC URL {mask_url(rpc_url)} is unreachable or belongs to a "
+                "different chain ID."
             )
+            log_with_context(
+                logger,
+                logging.ERROR,
+                error_msg,
+                {"rpc_url": mask_url(rpc_url), "chain_id": chain_id},
+            )
+            return error_msg
+    except (ConfigError, ValueError) as e:
+        log_with_context(
+            logger,
+            logging.ERROR,
+            "set_rpc failed",
+            {"chain_id": chain_id, "error": str(e)},
+        )
+        return str(e)
     except Exception as e:
+        log_with_context(
+            logger,
+            logging.ERROR,
+            "Unexpected error in set_rpc",
+            {"chain_id": chain_id, "error": str(e)},
+        )
         return f"Error validating RPC: {str(e)}"
 
 
@@ -218,6 +325,8 @@ def query_rpc_urls(chain_id: int) -> list[str]:
         chain_id: The chain ID to search for.
     """
     try:
+        validate_chain_id(chain_id)
+
         chains = None
         current_time = time.time()
 
@@ -267,11 +376,32 @@ def query_rpc_urls(chain_id: int) -> list[str]:
                     pass
 
         if not reliable_rpcs:
-            return ["Error: No reliable RPC URLs found for this chain ID."]
+            error_msg = "Error: No reliable RPC URLs found for this chain ID."
+            log_with_context(
+                logger,
+                logging.WARNING,
+                error_msg,
+                {"chain_id": chain_id, "candidates": len(candidates)},
+            )
+            return [error_msg]
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Found reliable RPCs",
+            {"chain_id": chain_id, "count": len(reliable_rpcs)},
+        )
 
         return reliable_rpcs
     except Exception as e:
-        return [f"Error fetching RPC URLs: {str(e)}"]
+        error_msg = f"Error fetching RPC URLs: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"chain_id": chain_id},
+        )
+        return [error_msg]
 
 
 @mcp.tool()
@@ -285,29 +415,71 @@ def check_native_balance(chain_id: int, address: str) -> str:
         address: The address to check balance for.
     """
     try:
-        rpc_url = get_working_rpc(chain_id)
-    except ValueError as e:
-        return str(e)
+        validate_chain_id(chain_id)
 
-    try:
+        try:
+            checksum_address = validate_address(address, param_name="address")
+        except ConfigError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "Invalid address",
+                {"address": address, "error": e.message},
+            )
+            return e.message
+
+        try:
+            rpc_url = get_working_rpc(chain_id)
+        except ValueError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "No RPC configuration",
+                {"chain_id": chain_id},
+            )
+            return str(e)
+
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
         if not w3.is_connected():
-            return (
+            error_msg = (
                 "Error: Could not connect to configured RPC URL. "
                 "It may have gone offline."
             )
-
-        try:
-            checksum_address = Web3.to_checksum_address(address)
-        except ValueError:
-            return f"Error: Invalid address format '{address}'"
+            log_with_context(
+                logger,
+                logging.ERROR,
+                error_msg,
+                {"rpc_url": mask_url(rpc_url), "chain_id": chain_id},
+            )
+            return error_msg
 
         balance_wei = w3.eth.get_balance(checksum_address)
         balance_eth = w3.from_wei(balance_wei, "ether")
 
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Balance checked",
+            {
+                "chain_id": chain_id,
+                "address": mask_address(address),
+                "balance": balance_eth,
+            },
+        )
+
         return f"{balance_eth} ETH"
     except Exception as e:
-        return f"Error fetching balance from {rpc_url}: {str(e)}"
+        error_msg = f"Error fetching balance from {mask_url(rpc_url)}: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {
+                "chain_id": chain_id,
+                "address": address,
+            },
+        )
+        return error_msg
 
 
 API_KEYS: dict[str, str] = {}
@@ -324,8 +496,17 @@ def set_api_key(provider: str, key: str) -> str:
         provider: The name of the service (e.g., 'etherscan').
         key: The API key.
     """
-    API_KEYS[provider.lower()] = key
+    provider_lower = provider.lower()
+    API_KEYS[provider_lower] = key
     save_config()
+
+    log_with_context(
+        logger,
+        logging.INFO,
+        "API key set",
+        {"provider": provider},
+    )
+
     return f"Success: API key set for {provider}"
 
 
@@ -337,11 +518,29 @@ def delete_rpc(chain_id: int) -> str:
     Args:
         chain_id: The chain ID to remove the RPC configuration for.
     """
+    validate_chain_id(chain_id)
+
     if chain_id in RPC_CONFIG:
         del RPC_CONFIG[chain_id]
         save_config()
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "RPC configuration deleted",
+            {"chain_id": chain_id},
+        )
+
         return f"Success: RPC configuration for chain ID {chain_id} deleted."
-    return f"Error: No RPC configuration found for chain ID {chain_id}."
+
+    error_msg = f"Error: No RPC configuration found for chain ID {chain_id}."
+    log_with_context(
+        logger,
+        logging.WARNING,
+        error_msg,
+        {"chain_id": chain_id},
+    )
+    return error_msg
 
 
 @mcp.tool()
@@ -356,8 +555,24 @@ def delete_api_key(provider: str) -> str:
     if provider_key in API_KEYS:
         del API_KEYS[provider_key]
         save_config()
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "API key deleted",
+            {"provider": provider},
+        )
+
         return f"Success: API key for {provider} deleted."
-    return f"Error: No API key found for {provider}."
+
+    error_msg = f"Error: No API key found for {provider}."
+    log_with_context(
+        logger,
+        logging.WARNING,
+        error_msg,
+        {"provider": provider},
+    )
+    return error_msg
 
 
 @mcp.tool()
@@ -371,9 +586,13 @@ def list_configs() -> str:
     if RPC_CONFIG:
         for chain_id, rpc_list in RPC_CONFIG.items():
             primary = rpc_list[0] if rpc_list else "None"
-            backups = ", ".join(rpc_list[1:]) if len(rpc_list) > 1 else "None"
+            backups = (
+                ", ".join([mask_url(r) for r in rpc_list[1:]])
+                if len(rpc_list) > 1
+                else "None"
+            )
             lines.append(f"  Chain {chain_id}:")
-            lines.append(f"    Primary: {primary}")
+            lines.append(f"    Primary: {mask_url(primary)}")
             if backups != "None":
                 lines.append(f"    Backups: {backups}")
     else:
@@ -387,6 +606,13 @@ def list_configs() -> str:
     else:
         lines.append("  No API keys configured.")
 
+    log_with_context(
+        logger,
+        logging.INFO,
+        "Configuration listed",
+        {"rpc_count": len(RPC_CONFIG), "api_key_count": len(API_KEYS)},
+    )
+
     return "\n".join(lines)
 
 
@@ -398,6 +624,8 @@ def check_rpc_health(chain_id: int) -> str:
     Args:
         chain_id: The chain ID to check RPC health for.
     """
+    validate_chain_id(chain_id)
+
     if chain_id not in RPC_CONFIG:
         return f"Error: No RPC configuration for chain ID {chain_id}."
 
@@ -416,7 +644,7 @@ def check_rpc_health(chain_id: int) -> str:
         else:
             status = f"✗ Unhealthy (error: {result['error']})"
 
-        lines.append(f"  [{role}] {rpc_url}")
+        lines.append(f"  [{role}] {mask_url(rpc_url)}")
         lines.append(f"    Status: {status}")
 
     return "\n".join(lines)
@@ -432,6 +660,8 @@ def set_backup_rpc(chain_id: int, rpc_url: str) -> str:
         chain_id: The chain ID to add the backup RPC for.
         rpc_url: The backup RPC URL to add.
     """
+    validate_chain_id(chain_id)
+
     if chain_id not in RPC_CONFIG:
         return (
             f"Error: No primary RPC configured for chain ID {chain_id}. "
@@ -441,20 +671,38 @@ def set_backup_rpc(chain_id: int, rpc_url: str) -> str:
     if verify_rpc(rpc_url, chain_id, timeout=10):
         existing_rpcs = RPC_CONFIG[chain_id]
         if rpc_url in existing_rpcs:
-            return f"Error: RPC URL {rpc_url} already configured for chain {chain_id}."
+            return f"Error: RPC URL {mask_url(rpc_url)} already configured for chain {chain_id}."
 
         new_config = existing_rpcs + [rpc_url]
         RPC_CONFIG[chain_id] = new_config[: MAX_BACKUPS + 1]
         save_config()
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Backup RPC added",
+            {
+                "chain_id": chain_id,
+                "config_count": len(RPC_CONFIG[chain_id]),
+            },
+        )
+
         return (
             f"Success: Backup RPC added for chain {chain_id}. "
             f"Total RPCs: {len(RPC_CONFIG[chain_id])}"
         )
     else:
-        return (
-            f"Error: RPC URL {rpc_url} is unreachable or belongs to a "
-            f"different chain ID."
+        error_msg = (
+            f"Error: RPC URL {mask_url(rpc_url)} is unreachable or belongs to a "
+            "different chain ID."
         )
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"chain_id": chain_id},
+        )
+        return error_msg
 
 
 @mcp.tool()
@@ -466,6 +714,8 @@ def rotate_rpc(chain_id: int) -> str:
     Args:
         chain_id: The chain ID to rotate RPCs for.
     """
+    validate_chain_id(chain_id)
+
     if chain_id not in RPC_CONFIG:
         return f"Error: No RPC configuration for chain ID {chain_id}."
 
@@ -477,6 +727,14 @@ def rotate_rpc(chain_id: int) -> str:
     RPC_CONFIG[chain_id] = new_config
     save_config()
     new_primary = new_config[0]
+
+    log_with_context(
+        logger,
+        logging.INFO,
+        "RPC rotated",
+        {"chain_id": chain_id, "new_primary": mask_url(new_primary)},
+    )
+
     return f"Success: Rotated to new primary RPC for chain {chain_id}: {new_primary}"
 
 
@@ -490,58 +748,129 @@ def get_source_code(chain_id: int, contract_address: str) -> str:
         chain_id: The chain ID of the network.
         contract_address: The address of the contract.
     """
-    sourcify_base_url = "https://sourcify.dev/server"
-
-    checksum_address = Web3.to_checksum_address(contract_address)
-
     try:
-        url = f"{sourcify_base_url}/files/{chain_id}/{checksum_address}"
-        response = requests.get(url, timeout=10)
+        validate_chain_id(chain_id)
 
-        if response.status_code == 200:
-            files = response.json()
-            result = []
-            for file in files:
-                path = file.get("path", "unknown_path")
-                content = file.get("content", "")
-                result.append(f"// File: {path}\n{content}")
-            return "\n\n".join(result)
-    except Exception:
-        pass
+        sourcify_base_url = config_manager.get("api", "sourcify_url")
 
-    api_key = API_KEYS.get("etherscan") or os.environ.get("ETHERSCAN_API_KEY")
+        checksum_address = validate_address(
+            contract_address, param_name="contract_address"
+        )
 
-    if api_key:
         try:
-            etherscan_url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={checksum_address}&apikey={api_key}"
-            response = requests.get(etherscan_url, timeout=10)
-            data = response.json()
+            url = f"{sourcify_base_url}/files/{chain_id}/{checksum_address}"
+            response = requests.get(url, timeout=10)
 
-            if data.get("status") == "1" and data.get("result"):
-                result_data = data["result"][0]
-                source_code = result_data["SourceCode"]
+            if response.status_code == 200:
+                files = response.json()
+                result = []
+                for file in files:
+                    path = file.get("path", "unknown_path")
+                    content = file.get("content", "")
+                    result.append(f"// File: {path}\n{content}")
 
-                if source_code.startswith("{{"):
-                    try:
-                        sources = json.loads(source_code[1:-1])
-                        return f"{json.dumps(sources, indent=2)}"
-                    except Exception:
-                        pass
+                log_with_context(
+                    logger,
+                    logging.INFO,
+                    "Source code fetched from Sourcify",
+                    {
+                        "chain_id": chain_id,
+                        "contract_address": mask_address(contract_address),
+                    },
+                )
 
-                return f"{source_code}"
+                return "\n\n".join(result)
+        except Exception:
+            pass
 
-            return (
-                f"Error: Contract not verified on Etherscan "
-                f"(Status: {data.get('message')})"
-            )
-        except Exception as e:
-            return f"Error fetching from Etherscan: {str(e)}"
+        api_key = API_KEYS.get("etherscan")
 
-    return (
-        f"Error: Contract not found on Sourcify for chain ID {chain_id} and "
-        f"address {checksum_address}. Etherscan fallback failed "
-        f"(missing API key or contract not found)."
-    )
+        if api_key:
+            try:
+                etherscan_url = config_manager.get("api", "etherscan_url")
+                etherscan_url = f"{etherscan_url}?chainid={chain_id}&module=contract&action=getsourcecode&address={checksum_address}&apikey={api_key}"
+                response = requests.get(etherscan_url, timeout=10)
+                data = response.json()
+
+                if data.get("status") == "1" and data.get("result"):
+                    result_data = data["result"][0]
+                    source_code = result_data["SourceCode"]
+
+                    if source_code.startswith("{{"):
+                        try:
+                            sources = json.loads(source_code[1:-1])
+                            return f"{json.dumps(sources, indent=2)}"
+                        except Exception:
+                            pass
+
+                    log_with_context(
+                        logger,
+                        logging.INFO,
+                        "Source code fetched from Etherscan",
+                        {
+                            "chain_id": chain_id,
+                            "contract_address": mask_address(contract_address),
+                        },
+                    )
+
+                    return f"{source_code}"
+
+                error_msg = (
+                    f"Error: Contract not verified on Etherscan "
+                    f"(Status: {data.get('message')})"
+                )
+                log_with_context(
+                    logger,
+                    logging.WARNING,
+                    error_msg,
+                    {
+                        "chain_id": chain_id,
+                        "contract_address": mask_address(contract_address),
+                    },
+                )
+                return error_msg
+            except Exception as e:
+                error_msg = f"Error fetching from Etherscan: {str(e)}"
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    error_msg,
+                    {
+                        "chain_id": chain_id,
+                        "contract_address": mask_address(contract_address),
+                    },
+                )
+                return error_msg
+
+        error_msg = (
+            f"Error: Contract not found on Sourcify for chain ID {chain_id} and "
+            f"address {mask_address(contract_address)}. Etherscan fallback failed "
+            f"(missing API key or contract not found)."
+        )
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"chain_id": chain_id, "contract_address": mask_address(contract_address)},
+        )
+        return error_msg
+    except ConfigError as e:
+        log_with_context(
+            logger,
+            logging.ERROR,
+            "Error in get_source_code",
+            {"error": e.message, "code": e.code},
+        )
+        return e.message
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"chain_id": chain_id, "contract_address": mask_address(contract_address)},
+        )
+        return error_msg
 
 
 @mcp.tool()
@@ -556,13 +885,32 @@ def get_token_balance(chain_id: int, token_address: str, wallet_address: str) ->
         wallet_address: The address to check the token balance for.
     """
     try:
-        rpc_url = get_working_rpc(chain_id)
-    except ValueError as e:
-        return str(e)
+        validate_chain_id(chain_id)
 
-    try:
-        checksum_token = Web3.to_checksum_address(token_address)
-        checksum_wallet = Web3.to_checksum_address(wallet_address)
+        try:
+            checksum_token = validate_address(token_address, param_name="token_address")
+            checksum_wallet = validate_address(
+                wallet_address, param_name="wallet_address"
+            )
+        except ConfigError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "Invalid address",
+                {"error": e.message},
+            )
+            return e.message
+
+        try:
+            rpc_url = get_working_rpc(chain_id)
+        except ValueError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "No RPC configuration",
+                {"chain_id": chain_id},
+            )
+            return str(e)
 
         balance = call_erc20_read(rpc_url, checksum_token, "balanceOf", checksum_wallet)
         decimals = call_erc20_read(rpc_url, checksum_token, "decimals")
@@ -573,9 +921,32 @@ def get_token_balance(chain_id: int, token_address: str, wallet_address: str) ->
             divisor = 10**decimals
             formatted_balance = f"{balance / divisor:.{decimals}f}"
 
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Token balance queried",
+            {
+                "chain_id": chain_id,
+                "token_address": mask_address(token_address),
+                "wallet_address": mask_address(wallet_address),
+                "balance": formatted_balance,
+            },
+        )
+
         return f"Balance: {formatted_balance} tokens (raw: {balance})"
     except Exception as e:
-        return f"Error fetching token balance: {str(e)}"
+        error_msg = f"Error fetching token balance: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {
+                "chain_id": chain_id,
+                "token_address": mask_address(token_address),
+                "wallet_address": mask_address(wallet_address),
+            },
+        )
+        return error_msg
 
 
 @mcp.tool()
@@ -589,12 +960,31 @@ def get_token_info(chain_id: int, token_address: str) -> str:
         token_address: The address of the ERC-20 token contract.
     """
     try:
-        rpc_url = get_working_rpc(chain_id)
-    except ValueError as e:
-        return str(e)
+        validate_chain_id(chain_id)
 
-    try:
-        checksum_address = Web3.to_checksum_address(token_address)
+        try:
+            checksum_address = validate_address(
+                token_address, param_name="token_address"
+            )
+        except ConfigError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "Invalid address",
+                {"error": e.message},
+            )
+            return e.message
+
+        try:
+            rpc_url = get_working_rpc(chain_id)
+        except ValueError as e:
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "No RPC configuration",
+                {"chain_id": chain_id},
+            )
+            return str(e)
 
         name = call_erc20_read(rpc_url, checksum_address, "name")
         symbol = call_erc20_read(rpc_url, checksum_address, "symbol")
@@ -607,6 +997,18 @@ def get_token_info(chain_id: int, token_address: str) -> str:
             divisor = 10**decimals
             formatted_supply = f"{total_supply / divisor:.{decimals}f}"
 
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Token info queried",
+            {
+                "chain_id": chain_id,
+                "token_address": mask_address(token_address),
+                "name": name,
+                "symbol": symbol,
+            },
+        )
+
         return (
             f"Token Information:\n"
             f"  Name: {name}\n"
@@ -615,7 +1017,14 @@ def get_token_info(chain_id: int, token_address: str) -> str:
             f"  Total Supply: {formatted_supply}"
         )
     except Exception as e:
-        return f"Error fetching token info: {str(e)}"
+        error_msg = f"Error fetching token info: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"chain_id": chain_id, "token_address": mask_address(token_address)},
+        )
+        return error_msg
 
 
 @mcp.tool()
@@ -629,11 +1038,9 @@ def setup_encryption(password: str | None = None) -> str:
     Returns:
         Success message or error.
     """
-    from mcp_blockchain_rail.crypto import EncryptionManager, generate_salt
-    from mcp_blockchain_rail.config_manager import get_config_manager
-    from mcp_blockchain_rail.logging_config import get_logger
-    import base64
     import os
+
+    from mcp_blockchain_rail.crypto import EncryptionManager
 
     if not password:
         password = os.getenv("RAIL_ENCRYPTION_KEY")
@@ -650,26 +1057,35 @@ def setup_encryption(password: str | None = None) -> str:
         config_manager = get_config_manager()
         encryption_manager = EncryptionManager.from_password(password)
 
-        # Encrypt all existing API keys
-        api_keys = config_manager.get("api_keys") or {}
+        api_keys = API_KEYS.copy()
         encrypted_keys = {}
 
         for provider, key in api_keys.items():
             encrypted_key = encryption_manager.encrypt(key)
             encrypted_keys[provider] = encrypted_key
 
-        # Update config with encrypted keys and salt
+        config_manager.set("encryption", "enabled", True)
+        config_manager.set("encryption", "salt", encryption_manager.get_salt_base64())
         config_manager.set("api_keys", encrypted_keys)
-        config_manager.set(
-            "encryption",
-            {"enabled": True, "salt": encryption_manager.get_salt_base64()},
-        )
-
         config_manager.save()
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Encryption enabled",
+            {"keys_count": len(encrypted_keys)},
+        )
 
         return f"Success: Encryption enabled. All {len(encrypted_keys)} API key(s) encrypted."
     except Exception as e:
-        return f"Error setting up encryption: {str(e)}"
+        error_msg = f"Error setting up encryption: {str(e)}"
+        log_with_context(
+            logger,
+            logging.ERROR,
+            error_msg,
+            {"error": str(e)},
+        )
+        return error_msg
 
 
 def main() -> None:
